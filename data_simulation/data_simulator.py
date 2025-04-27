@@ -64,3 +64,7 @@ def simulate_single_sku_demand(start_date="2025-01-01", days=730, seed=42):
     df.set_index("date", inplace=True)
     df = df.asfreq("D")
     return df
+
+if __name__ == "__main__":
+    df = simulate_single_sku_demand()
+    df.to_csv("data_simulation/data.csv", index=True)

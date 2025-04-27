@@ -1,32 +1,26 @@
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 class DriftDetector:
-    def __init__(self, window_size=7, threshold=25.0):
+    def __init__(self, window_size=7, threshold=25):
         self.window_size = window_size
         self.threshold = threshold
         self.errors = []
 
-    def update(self, error):
-        """Add a new error to the rolling window."""
-        self.errors.append(error)
-        if len(self.errors) > self.window_size:
-            self.errors.pop(0)
+    def update(self, error, timestamp=None):
+        self.errors.append((timestamp, error) if timestamp else ("unknown", error))
 
     def should_retrain(self):
-        """Return True if average error exceeds threshold."""
         if len(self.errors) < self.window_size:
             return False
-        mean_error = np.mean(self.errors)
-        return mean_error > self.threshold
+        recent_errors = [e for _, e in self.errors[-self.window_size:]]
+        recent_mae = np.mean(recent_errors)
+        if recent_mae > self.threshold:
+            logger.warning(f"🚨 Drift detected! Recent MAE = {recent_mae:.2f} > threshold = {self.threshold}")
+            return True
+        return False
 
-    def get_recent_mae(self):
-        if len(self.errors) == 0:
-            return 0.0
-        return np.mean(self.errors)
-
-
-if __name__ == "__main__":
-    detector = DriftDetector(window_size=3, threshold=10.0)
-    for e in [5, 12, 15]:
-        detector.update(e)
-        print(f"Updated with error: {e} | MAE: {detector.get_recent_mae():.2f} | Retrain: {detector.should_retrain()}")
+    def reset(self):
+        self.errors = []

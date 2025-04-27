@@ -1,4 +1,4 @@
-from data_simulator import simulate_single_sku_demand
+from test_simulator import simulate_single_sku_demand
 from data_streamer import DataStreamer
 import pandas as pd
 import os

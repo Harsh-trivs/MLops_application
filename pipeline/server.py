@@ -1,16 +1,19 @@
 from typing import Optional
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from functools import wraps
 import pandas as pd
 import io
 import json
 import logging
-from prometheus_client import start_http_server, Gauge, Counter
-from drift_detector import DriftDetector
-from model_trainer import save_metadata, save_model, train_model
-from model_wrapper import ForecastingModel
-from pathlib import Path
 import time
+import psutil
+from prometheus_client import start_http_server, Gauge, Counter, Histogram, ProcessCollector
+from utils.drift_detector import DriftDetector
+from utils.model_trainer import save_metadata, save_model, train_model
+from utils.model_wrapper import ForecastingModel
+from pathlib import Path
 
 # FastAPI app
 app = FastAPI()
@@ -26,20 +29,126 @@ PROMETHEUS_PORT = 8001  # Port for Prometheus metrics
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# ======================
 # Prometheus Metrics
-drift_detected_metric = Counter('drift_detected_count', 'Total number of drift detections')
-model_retrain_metric = Counter('model_retrain_count', 'Total number of model retrainings')
-drift_not_enough_data_metric = Counter('drift_not_enough_data_count', 'Drift detected but not enough data for retraining')
-predicted_metric = Gauge('predicted_demand', 'Predicted demand for a given date', ['date'])
-actual_metric = Gauge('actual_demand', 'Actual demand for a given date', ['date'])
+# ======================
+
+# Endpoint-specific metrics
+MODEL_INIT_REQUESTS = Counter(
+    'model_init_requests_total',
+    'Total requests to /model_init',
+    ['method', 'status_code']
+)
+MODEL_INIT_LATENCY = Histogram(
+    'model_init_request_latency_seconds',
+    'Latency of /model_init requests',
+    ['method']
+)
+
+LAST_TRAINED_DATE_REQUESTS = Counter(
+    'last_trained_date_requests_total',
+    'Total requests to /last_trained_date',
+    ['method', 'status_code']
+)
+LAST_TRAINED_DATE_LATENCY = Histogram(
+    'last_trained_date_request_latency_seconds',
+    'Latency of /last_trained_date requests',
+    ['method']
+)
+
+PREDICT_FOR_DATE_REQUESTS = Counter(
+    'predict_for_date_requests_total',
+    'Total requests to /predict_for_date',
+    ['method', 'status_code']
+)
+PREDICT_FOR_DATE_LATENCY = Histogram(
+    'predict_for_date_request_latency_seconds',
+    'Latency of /predict_for_date requests',
+    ['method']
+)
+
+REQUESTS_PER_IP = Counter(
+    'api_requests_per_ip_total',
+    'Total requests per client IP',
+    ['client_ip', 'endpoint', 'method']
+)
+
+# System metrics
+CPU_USAGE = Gauge('system_cpu_usage_percent', 'System CPU usage percent')
+MEMORY_USAGE = Gauge('system_memory_usage_percent', 'System memory usage percent')
+DISK_USAGE = Gauge('system_disk_usage_percent', 'System disk usage percent')
+NETWORK_BYTES_SENT = Gauge('system_network_bytes_sent', 'Network bytes sent')
+NETWORK_BYTES_RECV = Gauge('system_network_bytes_recv', 'Network bytes received')
+FILE_HANDLES = Gauge('system_file_handles', 'Number of open file handles')
 
 # Global state placeholders
 model: Optional[ForecastingModel] = None
 df_global: Optional[pd.DataFrame] = None
 drift_detector: Optional[DriftDetector] = None
 
+# ======================
+# Middleware
+# ======================
 
-# Utility functions
+class EndpointMetricsMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        method = request.method
+        path = request.url.path
+        client_ip = request.client.host or "unknown"
+        
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+        except Exception as e:
+            status_code = 500
+            raise e
+        finally:
+            duration = time.time() - start_time
+            
+            # Update metrics based on endpoint
+            if path == "/model_init":
+                MODEL_INIT_REQUESTS.labels(method=method, status_code=status_code).inc()
+                MODEL_INIT_LATENCY.labels(method=method).observe(duration)
+            elif path == "/last_trained_date":
+                LAST_TRAINED_DATE_REQUESTS.labels(method=method, status_code=status_code).inc()
+                LAST_TRAINED_DATE_LATENCY.labels(method=method).observe(duration)
+            elif path == "/predict_for_date":
+                PREDICT_FOR_DATE_REQUESTS.labels(method=method, status_code=status_code).inc()
+                PREDICT_FOR_DATE_LATENCY.labels(method=method).observe(duration)
+            
+            REQUESTS_PER_IP.labels(
+                client_ip=client_ip,
+                endpoint=request.url.path,
+                method=request.method
+            ).inc()
+        
+        return response
+
+app.add_middleware(EndpointMetricsMiddleware)
+
+# ======================
+# System Metrics Collector
+# ======================
+
+def update_system_metrics():
+    while True:
+        try:
+            CPU_USAGE.set(psutil.cpu_percent())
+            MEMORY_USAGE.set(psutil.virtual_memory().percent)
+            DISK_USAGE.set(psutil.disk_usage('/').percent)
+            net_io = psutil.net_io_counters()
+            NETWORK_BYTES_SENT.set(net_io.bytes_sent)
+            NETWORK_BYTES_RECV.set(net_io.bytes_recv)
+            FILE_HANDLES.set(len(psutil.Process().open_files()))
+        except Exception as e:
+            logger.error(f"Error collecting system metrics: {e}")
+        time.sleep(5)
+
+# ======================
+# Utility Functions
+# ======================
+
 def train_initial_model(df):
     initial_data = df.head(6 * 30)  # First 6 months
     logger.info("Training initial model...")
@@ -63,11 +172,14 @@ def get_last_trained_date():
             return pd.to_datetime(meta.get("last_trained_date"))
     return None
 
+# ======================
+# API Endpoints
+# ======================
 
 @app.post("/model_init")
 async def model_init(file: UploadFile = File(...), window_size: int = Form(...), threshold: float = Form(...)):
     global model, df_global, drift_detector
-    try : 
+    try: 
         # Load incoming CSV file
         contents = await file.read()
         df = pd.read_csv(io.BytesIO(contents), parse_dates=["date"], index_col="date").asfreq("D")
@@ -106,10 +218,13 @@ async def predict_for_current_date(current_date: str):
         current_date = pd.to_datetime(current_date)
         drift_detected = 0
         last_trained_date = get_last_trained_date()
+        
         if model is None or df_global is None:
             return JSONResponse(content={"error": "Model not initialized."}, status_code=500)
+            
         forecast_df = model.predict_n_days((current_date - last_trained_date).days)
         forecast_row = forecast_df[forecast_df['ds'] == current_date]
+        
         if forecast_row.empty:
             return JSONResponse(content={"error": "No forecast available for the given date."}, status_code=404)
         
@@ -119,31 +234,49 @@ async def predict_for_current_date(current_date: str):
         actual = df_global.loc[current_date, "demand"]
         error = abs(actual - predicted)
 
+        # Drift detection
         drift_detector.update(error, current_date)
         if drift_detector.should_retrain():
             drift_start_date = current_date
-            last_trained_date = get_last_trained_date()
-            # Retrain
             retrain_model(drift_start_date, df_global)
             model.load()
             drift_detected = 1
             drift_detector.reset()
 
-        predicted = float(predicted)
-        actual = float(actual)
-        error = float(error)
         json_response = {
             "date": current_date.strftime("%Y-%m-%d"),
-            "predicted": predicted,
-            "actual": actual,
-            "error": error,
-            'drift_detected': drift_detected
+            "predicted": float(predicted),
+            "actual": float(actual),
+            "error": float(error),
+            "drift_detected": drift_detected
         }
-        print(json_response)
+        
         return JSONResponse(content=json_response)
 
     except Exception as e:
         logger.exception("Error during prediction")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
+# ======================
+# Startup Event
+# ======================
 
+@app.on_event("startup")
+async def startup_event():
+    # Start Prometheus metrics server
+    start_http_server(PROMETHEUS_PORT)
+    logger.info(f"Prometheus metrics server started on port {PROMETHEUS_PORT}")
+    
+    # Start system metrics collection
+    import threading
+    threading.Thread(target=update_system_metrics, daemon=True).start()
+    
+    # Add process metrics collector
+    ProcessCollector(namespace='forecast_app')
+    
+    # Load model if exists
+    global model
+    if MODEL_PATH.exists():
+        model = ForecastingModel()
+        model.load()
+        logger.info("Loaded existing model")

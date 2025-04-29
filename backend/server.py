@@ -9,11 +9,17 @@ import json
 import logging
 import time
 import psutil
+import pickle
+import mlflow
+import tempfile
+from mlflow.models.signature import infer_signature
+from mlflow.tracking import MlflowClient
 from prometheus_client import start_http_server, Gauge, Counter, Histogram, ProcessCollector
 from utils.drift_detector import DriftDetector
 from utils.model_trainer import save_metadata, save_model, train_model
 from utils.model_wrapper import ForecastingModel
 from pathlib import Path
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 # FastAPI app
 app = FastAPI()
@@ -24,6 +30,10 @@ MODEL_PATH = BASE_DIR / "models" / "model.pkl"
 METADATA_PATH = BASE_DIR / "models" / "metadata.json"
 SEASONAL_PERIODS = 30
 PROMETHEUS_PORT = 8001  # Port for Prometheus metrics
+
+# MLflow Config
+MLFLOW_TRACKING_URI = "http://localhost:5000"
+MLFLOW_EXPERIMENT_NAME = "DemandForecasting"
 
 # Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -153,17 +163,37 @@ def train_initial_model(df):
     initial_data = df.head(6 * 30)  # First 6 months
     logger.info("Training initial model...")
     model = train_model(initial_data.reset_index().rename(columns={"date": "ds", "demand": "y"}))
-    save_model(model)
     save_metadata(initial_data.reset_index().rename(columns={"date": "ds", "demand": "y"}))
     logger.info("Initial model trained and saved.")
 
-def retrain_model(start_date, df):
+def retrain_model(start_date, df,drift_metadata=None):
     logger.info(f"🔁 Retraining model from {start_date.date()} onwards...")
     df_subset = df.loc[:start_date]
-    model = train_model(df_subset.reset_index().rename(columns={"date": "ds", "demand": "y"}))
-    save_model(model)
-    save_metadata(df_subset.reset_index().rename(columns={"date": "ds", "demand": "y"}))
-    logger.info("✅ Model retrained.")
+    
+    tags = {
+        "retraining": "true",
+        "retraining_trigger": "drift_detection" if drift_metadata else "periodic"
+    }
+    
+    if drift_metadata:
+        tags.update({
+            "drift_score": str(drift_metadata.get('score')),
+            "drift_threshold": str(drift_metadata.get('threshold')),
+            "drift_window_size": str(drift_metadata.get('window_size'))
+        })
+    
+    with mlflow.start_run(tags=tags):
+        model = train_model(
+            df_subset.reset_index().rename(columns={"date": "ds", "demand": "y"})
+        )
+        save_metadata(df_subset.reset_index().rename(columns={"date": "ds", "demand": "y"}))
+        
+        if drift_metadata:
+            mlflow.log_params({
+                f"drift_{k}": v for k, v in drift_metadata.items()
+            })
+        
+        logger.info("✅ Model retrained.")  
 
 def get_last_trained_date():
     if METADATA_PATH.exists():
@@ -238,7 +268,17 @@ async def predict_for_current_date(current_date: str):
         drift_detector.update(error, current_date)
         if drift_detector.should_retrain():
             drift_start_date = current_date
-            retrain_model(drift_start_date, df_global)
+            drift_metadata = {
+                'threshold': drift_detector.threshold,
+                'window_size': drift_detector.window_size,
+                'trigger_date': str(current_date)
+            }
+            
+            # Log drift detection
+            with mlflow.start_run(nested=True):
+                mlflow.log_params(drift_metadata)
+            
+            retrain_model(drift_start_date, df_global, drift_metadata)
             model.load()
             drift_detected = 1
             drift_detector.reset()
@@ -263,6 +303,10 @@ async def predict_for_current_date(current_date: str):
 
 @app.on_event("startup")
 async def startup_event():
+    # Configure MLflow
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+
     # Start Prometheus metrics server
     start_http_server(PROMETHEUS_PORT)
     logger.info(f"Prometheus metrics server started on port {PROMETHEUS_PORT}")

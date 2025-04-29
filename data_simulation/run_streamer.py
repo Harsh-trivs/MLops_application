@@ -27,7 +27,7 @@ if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
     initial_df.to_csv(csv_path)
 
 # Step 3: Stream remaining data every 5 seconds
-streamer = DataStreamer(df, start_date=start_cutoff, interval_sec=0.01)
+streamer = DataStreamer(df, start_date=start_cutoff, interval_sec=1)
 logging.basicConfig(level=logging.INFO)
 
 for date, demand in streamer.stream():

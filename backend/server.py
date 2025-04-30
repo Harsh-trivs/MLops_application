@@ -167,6 +167,7 @@ def train_initial_model(df):
     logger.info("Initial model trained and saved.")
 
 def retrain_model(start_date, df,drift_metadata=None):
+    time.sleep(2)
     logger.info(f"🔁 Retraining model from {start_date.date()} onwards...")
     df_subset = df.loc[:start_date]
     
@@ -242,6 +243,7 @@ async def last_trained_date():
 @app.get("/predict_for_date")
 async def predict_for_current_date(current_date: str):
     global model, df_global, drift_detector
+    time.sleep(0.5)
     try:
         # Remove quotes if present
         current_date = current_date.replace('"', '')

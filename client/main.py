@@ -6,7 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go  # Add this import
 
 # Configuration
-API_BASE_URL = "http://localhost:8000"  # Update with your FastAPI server URL
+API_BASE_URL = "http://server:8000"  # Update with your FastAPI server URL
 
 st.set_page_config(layout="wide")
 st.title("Dynamic Forecasting Visualization")

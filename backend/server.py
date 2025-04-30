@@ -32,7 +32,7 @@ SEASONAL_PERIODS = 30
 PROMETHEUS_PORT = 8001  # Port for Prometheus metrics
 
 # MLflow Config
-MLFLOW_TRACKING_URI = "http://localhost:5000"
+MLFLOW_TRACKING_URI = "http://mlflow:5000"
 MLFLOW_EXPERIMENT_NAME = "DemandForecasting"
 
 # Logging

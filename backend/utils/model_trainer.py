@@ -72,7 +72,7 @@ def train_model(df: pd.DataFrame,custom_params=None):
         y_true = df['y'].values
         y_pred = forecast.loc[:len(y_true)-1, 'yhat'].values
         mae = mean_absolute_error(y_true, y_pred)
-        rmse = mean_squared_error(y_true, y_pred, squared=False)
+        rmse = mean_squared_error(y_true, y_pred)
         
         mlflow.log_metrics({
             'mae': mae,

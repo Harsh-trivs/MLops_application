@@ -30,7 +30,7 @@ with st.sidebar:
     st.header("Model Configuration")
     uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
     window_size = st.number_input("Window Size", min_value=1, value=7)
-    threshold = st.number_input("Threshold", min_value=0.0, value=8.0, step=0.01)
+    threshold = st.number_input("Threshold", min_value=0.0, value=40.0, step=0.01)
     
     if st.button("Initialize Model") and uploaded_file is not None:
         try:

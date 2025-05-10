@@ -28,7 +28,6 @@ services:
       - mlflow-data:/mlflow
     ports:
       - "8000:8000"
-      - "9100:9100"
       - "8001:8001"
     restart: unless-stopped
     networks:
